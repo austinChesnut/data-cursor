@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric, LambdaCase #-}
 module Data.ListCursor
-  ( Data.ListCursor.empty
+  ( Cursor(..)
+  , Data.ListCursor.empty
   , mkCursor
   , mkCursorAt
   , mkCursorClip
@@ -23,7 +24,7 @@ module Data.ListCursor
   , delNext
   , split
   , combine
-  , Data.ListCursor.fold
+  , render
   , Data.ListCursor.filter
   ) where
 
@@ -182,14 +183,10 @@ delNext = \case
 --------------------------------------------------------------------------------
 
 prevItem :: Alternative t => Cursor a -> t a
-prevItem = \case
-  MkCursor { prev = (p : _) } -> pure p
-  _                           -> Control.Applicative.empty
+prevItem = listToAlt . prev
 
 nextItem :: Alternative t => Cursor a -> t a
-nextItem = \case
-  MkCursor { next = (n : _) } -> pure n
-  _                           -> Control.Applicative.empty
+nextItem = listToAlt . next
 
 split :: Cursor a -> (Cursor a, Cursor a)
 split MkCursor { prev = ps, next = ns } =
@@ -199,8 +196,8 @@ combine :: Cursor a -> Cursor a -> Cursor a
 combine MkCursor { prev = ps1, next = ns1 } MkCursor { prev = ps2, next = ns2 }
   = MkCursor { prev = reverse ns1 ++ ps1, next = reverse ps2 ++ ns2 }
 
-fold :: ([a] -> [a] -> b) -> Cursor a -> b
-fold f MkCursor { prev = ps, next = ns } = f (reverse ps) ns
+render :: ([a] -> [a] -> b) -> Cursor a -> b
+render f MkCursor { prev = ps, next = ns } = f (reverse ps) ns
 
 filter :: (a -> Bool) -> Cursor a -> Cursor a
 filter p MkCursor { prev = ps, next = ns } =

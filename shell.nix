@@ -10,6 +10,8 @@ pkgs.mkShell {
         containers
         hoogle
         parsec
+        witch
+        QuickCheck
       ]))
       # pkgs.ormolu
       pkgs.haskellPackages.brittany

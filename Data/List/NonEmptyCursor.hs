@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, TypeApplications, DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables, RankNTypes, LambdaCase, TypeApplications, DeriveGeneric #-}
 module Data.List.NonEmptyCursor
   ( Cursor(..)
   , mkCursor
@@ -31,12 +31,15 @@ module Data.List.NonEmptyCursor
   , dragTo
   ) where
 
+-- Witch
+import           Witch
+
 import           Control.Applicative
 import           Data.Bifunctor
 -- base
 import qualified Data.List.NonEmpty            as NE
 import           Data.Maybe
-import           GHC.Generics
+import           GHC.Generics            hiding ( from )
 
 
 
@@ -73,18 +76,18 @@ instance Bifunctor Cursor where
 -- Creation
 --------------------------------------------------------------------------------
 
-mkCursor :: (a -> b) -> NE.NonEmpty a -> Cursor a b
-mkCursor f (x NE.:| xs) = MkCursor { prev = [], current = f x, next = xs }
+mkCursor :: (From a b) => NE.NonEmpty a -> Cursor a b
+mkCursor (x NE.:| xs) = MkCursor { prev = [], current = from x, next = xs }
 
 mkCursorAt
-  :: (Alternative t, Integral n)
-  => (a -> b)
-  -> n
+  :: (From a b, Alternative t, Integral n)
+  => n
   -> NE.NonEmpty a
   -> t (Cursor a b)
-mkCursorAt f i ne = case NE.splitAt (fromIntegral i) ne of
-  (ps, c : ns) -> pure MkCursor { prev = reverse ps, current = f c, next = ns }
-  _            -> empty
+mkCursorAt i ne = case NE.splitAt (fromIntegral i) ne of
+  (ps, c : ns) ->
+    pure MkCursor { prev = reverse ps, current = from c, next = ns }
+  _ -> empty
 
 singleton :: b -> Cursor a b
 singleton x = MkCursor { prev = [], current = x, next = [] }
@@ -93,11 +96,10 @@ singleton x = MkCursor { prev = [], current = x, next = [] }
 -- Misc
 --------------------------------------------------------------------------------
 
-toNonEmpty :: (b -> a) -> Cursor a b -> NE.NonEmpty a
-toNonEmpty f MkCursor { prev = ps, current = c, next = ns } =
-  case reverse ps of
-    []         -> f c NE.:| ns
-    (p' : ps') -> p' NE.:| (ps' ++ [f c] ++ ns)
+toNonEmpty :: (From b a) => Cursor a b -> NE.NonEmpty a
+toNonEmpty MkCursor { prev = ps, current = c, next = ns } = case reverse ps of
+  []         -> from c NE.:| ns
+  (p' : ps') -> p' NE.:| (ps' ++ [from c] ++ ns)
 
 index :: Num n => Cursor a b -> n
 index MkCursor { prev = ps } = sum $ map (const 1) ps
@@ -121,13 +123,13 @@ insertPrev x c = c { prev = x : prev c }
 insertNext :: a -> Cursor a b -> Cursor a b
 insertNext x c = c { next = x : next c }
 
-insertPrevSelect :: (b -> a) -> b -> Cursor a b -> Cursor a b
-insertPrevSelect f x MkCursor { prev = ps, current = c, next = ns } =
-  MkCursor { prev = f c : ps, current = x, next = ns }
+insertPrevSelect :: (From b a) => b -> Cursor a b -> Cursor a b
+insertPrevSelect x MkCursor { prev = ps, current = c, next = ns } =
+  MkCursor { prev = from c : ps, current = x, next = ns }
 
-insertNextSelect :: (b -> a) -> b -> Cursor a b -> Cursor a b
-insertNextSelect f x MkCursor { prev = ps, current = c, next = ns } =
-  MkCursor { prev = ps, current = x, next = f c : ns }
+insertNextSelect :: (From b a) => b -> Cursor a b -> Cursor a b
+insertNextSelect x MkCursor { prev = ps, current = c, next = ns } =
+  MkCursor { prev = ps, current = x, next = from c : ns }
 
 --------------------------------------------------------------------------------
 -- Deletion
@@ -145,18 +147,22 @@ delNext = \case
     pure MkCursor { prev = ps, current = c, next = ns }
   _ -> empty
 
-delSelectPrev :: Alternative t => (a -> b) -> Cursor a b -> t (Cursor a b)
-delSelectPrev f = \case
+delSelectPrev
+  :: forall a b t . (From a b, Alternative t) => Cursor a b -> t (Cursor a b)
+delSelectPrev = \case
   MkCursor { prev = p : ps, current = _, next = ns } ->
-    let c' = MkCursor { prev = ps, current = f p, next = ns }
-    in  pure c' <|> delSelectPrev f c'
+    let c' :: Cursor a b
+        c' = MkCursor { prev = ps, current = from p, next = ns }
+    in  pure c' <|> delSelectPrev c'
   _ -> empty
 
-delSelectNext :: Alternative t => (a -> b) -> Cursor a b -> t (Cursor a b)
-delSelectNext f = \case
+delSelectNext
+  :: forall a b t . (From a b, Alternative t) => Cursor a b -> t (Cursor a b)
+delSelectNext = \case
   MkCursor { prev = ps, current = _, next = n : ns } ->
-    let c' = MkCursor { prev = ps, current = f n, next = ns }
-    in  pure c' <|> delSelectNext f c'
+    let c' :: Cursor a b
+        c' = MkCursor { prev = ps, current = from n, next = ns }
+    in  pure c' <|> delSelectNext c'
   _ -> empty
 
 --------------------------------------------------------------------------------
@@ -164,53 +170,55 @@ delSelectNext f = \case
 --------------------------------------------------------------------------------
 
 selectPrev
-  :: Alternative t => (b -> a) -> (a -> b) -> Cursor a b -> t (Cursor a b)
-selectPrev f g = \case
+  :: forall a b t
+   . (From a b, From b a, Alternative t)
+  => Cursor a b
+  -> t (Cursor a b)
+selectPrev = \case
   MkCursor { prev = p : ps, current = c, next = ns } ->
-    let c' = MkCursor { prev = ps, current = g p, next = f c : ns }
-    in  pure c' <|> selectPrev f g c'
+    let c' :: Cursor a b
+        c' = MkCursor { prev = ps, current = from p, next = from c : ns }
+    in  pure c' <|> selectPrev c'
   _ -> empty
 
 selectNext
-  :: Alternative t => (b -> a) -> (a -> b) -> Cursor a b -> t (Cursor a b)
-selectNext f g = \case
+  :: forall a b t
+   . (From a b, From b a, Alternative t)
+  => Cursor a b
+  -> t (Cursor a b)
+selectNext = \case
   MkCursor { prev = ps, current = c, next = n : ns } ->
-    let c' = MkCursor { prev = f c : ps, current = g n, next = ns }
-    in  pure c' <|> selectNext f g c'
+    let c' :: Cursor a b
+        c' = MkCursor { prev = from c : ps, current = from n, next = ns }
+    in  pure c' <|> selectNext c'
   _ -> empty
 
-selectFirst :: (b -> a) -> (a -> b) -> Cursor a b -> Cursor a b
-selectFirst f g c = foldl @[] (const id) c $ selectPrev f g c
+selectFirst :: (From a b, From b a) => Cursor a b -> Cursor a b
+selectFirst c = foldl @[] (const id) c $ selectPrev c
 
-selectLast :: (b -> a) -> (a -> b) -> Cursor a b -> Cursor a b
-selectLast f g c = foldl @[] (const id) c $ selectNext f g c
+selectLast :: (From a b, From b a) => Cursor a b -> Cursor a b
+selectLast c = foldl @[] (const id) c $ selectNext c
 
 selectIndex
-  :: (Integral n, Alternative t)
-  => (b -> a)
-  -> (a -> b)
-  -> n
+  :: (From a b, From b a, Integral n, Alternative t)
+  => n
   -> Cursor a b
   -> t (Cursor a b)
-selectIndex f g i c = mkCursorAt g i $ toNonEmpty f c
+selectIndex i = mkCursorAt i . toNonEmpty
 
 selectPrevUntil
-  :: Alternative t
-  => (b -> a)
-  -> (a -> b)
-  -> (b -> Bool)
+  :: (From a b, From b a, Alternative t)
+  => (b -> Bool)
   -> Cursor a b
   -> t (Cursor a b)
-selectPrevUntil f g p = listToAlts . filter (p . current) . selectPrev f g
+selectPrevUntil p = listToAlts . filter (p . current) . selectPrev
 
 selectNextUntil
-  :: Alternative t
-  => (b -> a)
-  -> (a -> b)
-  -> (b -> Bool)
+  :: (From a b, From b a, Alternative t)
+  => (b -> Bool)
   -> Cursor a b
   -> t (Cursor a b)
-selectNextUntil f g p = listToAlts . filter (p . current) . selectNext f g
+selectNextUntil p = listToAlts . filter (p . current) . selectNext
 
 --------------------------------------------------------------------------------
 -- Drag

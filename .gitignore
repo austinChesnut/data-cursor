@@ -1,0 +1,9 @@
+*.o
+*.hi
+*.dyn_hi
+*.dyn_o
+*.old
+*.swp
+.envrc
+.ghci
+Main

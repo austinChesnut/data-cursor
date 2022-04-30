@@ -1,11 +1,10 @@
-{-# LANGUAGE ScopedTypeVariables, RankNTypes, LambdaCase, TypeApplications, DeriveGeneric #-}
+{-# LANGUAGE MultiParamTypeClasses, ScopedTypeVariables, RankNTypes, LambdaCase, DeriveGeneric #-}
 module Data.List.NonEmptyCursor
   ( Cursor(..)
-  , mkCursor
   , mkCursorAt
   , singleton
-  , toNonEmpty
   , index
+  , Data.List.NonEmptyCursor.length
   , render
   , insertPrev
   , insertNext
@@ -20,6 +19,7 @@ module Data.List.NonEmptyCursor
   , selectFirst
   , selectLast
   , selectIndex
+  , selectRelative
   , selectPrevUntil
   , selectNextUntil
   , prevItem
@@ -29,26 +29,24 @@ module Data.List.NonEmptyCursor
   , dragStart
   , dragEnd
   , dragTo
+  , dragRelitive
   ) where
 
 -- Witch
 import           Witch
 
+-- QuickCheck
+import           Test.QuickCheck
+
+-- base
 import           Control.Applicative
 import           Data.Bifunctor
--- base
 import qualified Data.List.NonEmpty            as NE
 import           Data.Maybe
 import           GHC.Generics            hiding ( from )
+import           Numeric.Natural
 
 
-
---------------------------------------------------------------------------------
--- Local Helpers
---------------------------------------------------------------------------------
-
-listToAlts :: Alternative t => [a] -> t a
-listToAlts = foldl (\alt x -> alt <|> pure x) empty
 
 --------------------------------------------------------------------------------
 -- Type
@@ -72,22 +70,35 @@ instance Bifunctor Cursor where
   bimap f g MkCursor { prev = ps, current = c, next = ns } =
     MkCursor { prev = map f ps, current = g c, next = map f ns }
 
+instance From a b => From (NE.NonEmpty a) (Cursor a b) where
+  from (x NE.:| xs) = MkCursor { prev = [], current = from x, next = xs }
+
+instance From b a => From (Cursor a b) (NE.NonEmpty a) where
+  from MkCursor { prev = ps, current = c, next = ns } =
+    foldl (flip NE.cons) (from c NE.:| ns) ps
+
+instance From b a => From (Cursor a b) [a] where
+  from = NE.toList . from
+
+instance From a b => TryFrom [a] (Cursor a b) where
+  tryFrom = maybeTryFrom (fmap from . NE.nonEmpty)
+
+instance (Arbitrary a, Arbitrary b ) => Arbitrary (Cursor a b) where
+  arbitrary = liftA3 MkCursor arbitrary arbitrary arbitrary
+
 --------------------------------------------------------------------------------
 -- Creation
 --------------------------------------------------------------------------------
 
-mkCursor :: (From a b) => NE.NonEmpty a -> Cursor a b
-mkCursor (x NE.:| xs) = MkCursor { prev = [], current = from x, next = xs }
-
 mkCursorAt
-  :: (From a b, Alternative t, Integral n)
-  => n
+  :: (From a b, From b a, Alternative t)
+  => Natural
   -> NE.NonEmpty a
   -> t (Cursor a b)
-mkCursorAt i ne = case NE.splitAt (fromIntegral i) ne of
-  (ps, c : ns) ->
-    pure MkCursor { prev = reverse ps, current = from c, next = ns }
-  _ -> empty
+mkCursorAt i =
+  let mkCursorAt' i' cur | i' > 0    = mkCursorAt' (i' - 1) =<< selectNext cur
+                         | otherwise = Just cur
+  in  maybe empty pure . mkCursorAt' i . from
 
 singleton :: b -> Cursor a b
 singleton x = MkCursor { prev = [], current = x, next = [] }
@@ -96,22 +107,21 @@ singleton x = MkCursor { prev = [], current = x, next = [] }
 -- Misc
 --------------------------------------------------------------------------------
 
-toNonEmpty :: (From b a) => Cursor a b -> NE.NonEmpty a
-toNonEmpty MkCursor { prev = ps, current = c, next = ns } = case reverse ps of
-  []         -> from c NE.:| ns
-  (p' : ps') -> p' NE.:| (ps' ++ [from c] ++ ns)
-
 index :: Num n => Cursor a b -> n
-index MkCursor { prev = ps } = sum $ map (const 1) ps
+index = foldr (\_ -> (+) 1) 0 . prev
+
+length :: Num n => Cursor a b -> n
+length MkCursor { prev = ps, next = ns } =
+  1 + fromIntegral (Prelude.length ps) + fromIntegral (Prelude.length ns)
 
 render :: ([a] -> b -> [a] -> c) -> Cursor a b -> c
 render f MkCursor { prev = ps, current = c, next = ns } = f (reverse ps) c ns
 
 prevItem :: Alternative t => Cursor a b -> t a
-prevItem = listToAlts . prev
+prevItem = maybe empty pure . listToMaybe . prev
 
 nextItem :: Alternative t => Cursor a b -> t a
-nextItem = listToAlts . next
+nextItem = maybe empty pure . listToMaybe . next
 
 --------------------------------------------------------------------------------
 -- Insertion
@@ -147,22 +157,16 @@ delNext = \case
     pure MkCursor { prev = ps, current = c, next = ns }
   _ -> empty
 
-delSelectPrev
-  :: forall a b t . (From a b, Alternative t) => Cursor a b -> t (Cursor a b)
+delSelectPrev :: (Alternative t, From a b) => Cursor a b -> t (Cursor a b)
 delSelectPrev = \case
   MkCursor { prev = p : ps, current = _, next = ns } ->
-    let c' :: Cursor a b
-        c' = MkCursor { prev = ps, current = from p, next = ns }
-    in  pure c' <|> delSelectPrev c'
+    pure MkCursor { prev = ps, current = from p, next = ns }
   _ -> empty
 
-delSelectNext
-  :: forall a b t . (From a b, Alternative t) => Cursor a b -> t (Cursor a b)
+delSelectNext :: (Alternative t, From a b) => Cursor a b -> t (Cursor a b)
 delSelectNext = \case
   MkCursor { prev = ps, current = _, next = n : ns } ->
-    let c' :: Cursor a b
-        c' = MkCursor { prev = ps, current = from n, next = ns }
-    in  pure c' <|> delSelectNext c'
+    pure MkCursor { prev = ps, current = from n, next = ns }
   _ -> empty
 
 --------------------------------------------------------------------------------
@@ -171,54 +175,66 @@ delSelectNext = \case
 
 selectPrev
   :: forall a b t
-   . (From a b, From b a, Alternative t)
+   . (Alternative t, From a b, From b a)
   => Cursor a b
   -> t (Cursor a b)
 selectPrev = \case
   MkCursor { prev = p : ps, current = c, next = ns } ->
-    let c' :: Cursor a b
-        c' = MkCursor { prev = ps, current = from p, next = from c : ns }
-    in  pure c' <|> selectPrev c'
+    pure MkCursor { prev = ps, current = from p, next = from c : ns }
   _ -> empty
 
 selectNext
   :: forall a b t
-   . (From a b, From b a, Alternative t)
+   . (Alternative t, From a b, From b a)
   => Cursor a b
   -> t (Cursor a b)
 selectNext = \case
   MkCursor { prev = ps, current = c, next = n : ns } ->
-    let c' :: Cursor a b
-        c' = MkCursor { prev = from c : ps, current = from n, next = ns }
-    in  pure c' <|> selectNext c'
+    pure MkCursor { prev = from c : ps, current = from n, next = ns }
   _ -> empty
 
 selectFirst :: (From a b, From b a) => Cursor a b -> Cursor a b
-selectFirst c = foldl @[] (const id) c $ selectPrev c
+selectFirst c = maybe c selectFirst $ selectPrev c
 
 selectLast :: (From a b, From b a) => Cursor a b -> Cursor a b
-selectLast c = foldl @[] (const id) c $ selectNext c
+selectLast c = maybe c selectLast $ selectNext c
 
 selectIndex
-  :: (From a b, From b a, Integral n, Alternative t)
-  => n
+  :: (Alternative t, From a b, From b a)
+  => Natural
   -> Cursor a b
   -> t (Cursor a b)
-selectIndex i = mkCursorAt i . toNonEmpty
+selectIndex i = mkCursorAt i . from
+
+selectRelative
+  :: (Alternative t, From a b, From b a)
+  => Integer
+  -> Cursor a b
+  -> t (Cursor a b)
+selectRelative i c = case compare i 0 of
+  LT -> maybe empty pure $ selectRelative (i + 1) =<< selectPrev c
+  EQ -> pure c
+  GT -> maybe empty pure $ selectRelative (i - 1) =<< selectNext c
 
 selectPrevUntil
   :: (From a b, From b a, Alternative t)
   => (b -> Bool)
   -> Cursor a b
   -> t (Cursor a b)
-selectPrevUntil p = listToAlts . filter (p . current) . selectPrev
+selectPrevUntil p c = case selectPrev c of
+  Just c'@MkCursor { current = theCurrent } | p theCurrent -> pure c'
+  Just c' -> selectPrevUntil p c'
+  _       -> empty
 
 selectNextUntil
   :: (From a b, From b a, Alternative t)
   => (b -> Bool)
   -> Cursor a b
   -> t (Cursor a b)
-selectNextUntil p = listToAlts . filter (p . current) . selectNext
+selectNextUntil p c = case selectNext c of
+  Just c'@MkCursor { current = theCurrent } | p theCurrent -> pure c'
+  Just c' -> selectNextUntil p c'
+  _       -> empty
 
 --------------------------------------------------------------------------------
 -- Drag
@@ -227,25 +243,26 @@ selectNextUntil p = listToAlts . filter (p . current) . selectNext
 dragPrev :: Alternative t => Cursor a b -> t (Cursor a b)
 dragPrev = \case
   MkCursor { prev = p : ps, current = c, next = ns } ->
-    let c' = MkCursor { prev = ps, current = c, next = p : ns }
-    in  pure c' <|> dragPrev c'
+    pure MkCursor { prev = ps, current = c, next = p : ns }
   _ -> empty
 
 dragNext :: Alternative t => Cursor a b -> t (Cursor a b)
 dragNext = \case
   MkCursor { prev = ps, current = c, next = n : ns } ->
-    let c' = MkCursor { prev = n : ps, current = c, next = ns }
-    in  pure c' <|> dragNext c'
+    pure MkCursor { prev = n : ps, current = c, next = ns }
   _ -> empty
 
 dragStart :: Cursor a b -> Cursor a b
-dragStart c = foldl @[] (const id) c $ dragPrev c
+dragStart c = maybe c dragStart $ dragPrev c
 
 dragEnd :: Cursor a b -> Cursor a b
-dragEnd c = foldl @[] (const id) c $ dragPrev c
+dragEnd c = maybe c dragEnd $ dragNext c
 
-dragTo :: (Alternative t, Integral n) => n -> Cursor a b -> t (Cursor a b)
-dragTo i c = case compare i (index c) of
-  LT -> maybe empty pure $ listToMaybe $ drop (fromIntegral i - 1) $ dragPrev c
+dragTo :: Alternative t => Natural -> Cursor a b -> t (Cursor a b)
+dragTo i c = dragRelitive (toInteger i - index c) c
+
+dragRelitive :: Alternative t => Integer -> Cursor a b -> t (Cursor a b)
+dragRelitive i c = case compare i 0 of
+  LT -> maybe empty pure $ dragRelitive (i + 1) =<< dragPrev c
   EQ -> pure c
-  GT -> maybe empty pure $ listToMaybe $ drop (fromIntegral i - 1) $ dragNext c
+  GT -> maybe empty pure $ dragRelitive (i - 1) =<< dragNext c
